@@ -4,6 +4,7 @@ use std::arch::x86_64::{
     _mm512_mask_sub_epi32, _mm512_set_epi32, _mm512_set1_epi8, _mm512_stream_si512,
     _mm512_sub_epi32,
 };
+use std::env;
 
 fn main() -> Result<(), Error> {
     //let test_packet: [u8; 64] = [
@@ -17,6 +18,12 @@ fn main() -> Result<(), Error> {
     //    0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x22,
     //    0x23, 0x24, 0x25, 0x26, 0x27,
     //];
+
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        panic!("Нет интерфейса")
+    }
 
     const PACKET_COUNT: usize = 100_000;
 
@@ -55,7 +62,7 @@ fn main() -> Result<(), Error> {
     let elem_9 = ((udp_len << 16) | base_dst_port) as i32;
 
     // Open the netmap interface
-    let nm = NetmapBuilder::new("netmap:ens224")
+    let nm = NetmapBuilder::new(&args[1])
         //.num_tx_rings(1)
         //.num_rx_rings(1)
         .build()?;
