@@ -4,6 +4,7 @@ use libc::{POLLOUT, c_ulong, ioctl, poll, pollfd};
 use std::io;
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
+use std::println;
 use std::ptr;
 use std::slice;
 
@@ -175,25 +176,24 @@ impl<'a> TxRing<'a> {
     pub fn reserve_all(&mut self) -> Result<(BatchReservation<'a>, usize), Error> {
         unsafe {
             let ring_ptr = self.0.ring;
-            let head = (*ring_ptr).head;
+            let cur = (*ring_ptr).cur; // Используем cur, а не head!
             let tail = (*ring_ptr).tail;
-            let num_slots = (*ring_ptr).num_slots; // Поле имеет тип u32
+            let num_slots = (*ring_ptr).num_slots;
 
-            // 1. Вычисляем текущее количество занятых слотов
-            let current_used_slots = (head.wrapping_sub(tail).wrapping_add(num_slots)) % num_slots;
+            //расчет свободного места netmap
+            let available_slots = if tail >= cur {
+                tail - cur
+            } else {
+                tail + num_slots - cur
+            } as usize;
 
-            // 2. Вычисляем максимально доступное пространство (максимум num_slots - 1)
-            let available_slots = (num_slots - 1).saturating_sub(current_used_slots) as usize;
-
-            // Если свободных слотов вообще нет, возвращаем ошибку
             if available_slots == 0 {
                 return Err(Error::InsufficientSpace);
             }
 
-            // 3. Резервируем все доступные слоты
             let reservation = BatchReservation {
                 ring: self.0.ring,
-                start: head,
+                start: cur, // Батч должен начинаться с текущего cur!
                 count: available_slots,
                 _marker: PhantomData,
             };
@@ -253,8 +253,8 @@ impl<'a> BatchReservation<'a> {
             // Сдвигаем head и cur ТОЛЬКО на количество реально записанных пакетов
             let new_head = (self.start + actual_written as u32) % num_slots;
 
-            (*self.ring).cur = new_head;
-            (*self.ring).head = new_head;
+            std::ptr::write_volatile(&mut (*self.ring).cur, new_head);
+            std::ptr::write_volatile(&mut (*self.ring).head, new_head);
         }
     }
 }

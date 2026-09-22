@@ -25,7 +25,7 @@ fn main() -> Result<(), Error> {
         panic!("Нет интерфейса")
     }
 
-    const PACKET_COUNT: usize = 100_000;
+    const PACKET_COUNT: usize = 1000_000;
 
     // Исходные MAC-адреса (взяты из вашего дампа)
     let dst_mac: u64 = 0xDDCCBBAA2211;
@@ -160,60 +160,76 @@ fn main() -> Result<(), Error> {
 
             let mut i: usize = 0;
             while i < PACKET_COUNT {
-                if let Ok((mut batch, count)) = tx_ring.reserve_all() {
-                    let mut packets_written = 0;
-                    for z in 0..count {
-                        if let Ok(dst_ptr) = batch.packet(z, 64) {
-                            //println!("Ok {:?}", &dst_ptr);
-                            _mm512_stream_si512(
-                                dst_ptr.as_mut_ptr() as *mut __m512i,
-                                current_packet_zmm,
-                            );
+                match tx_ring.reserve_all() {
+                    Ok((mut batch, count)) => {
+                        let mut packets_written = 0;
+                        for z in 0..count {
+                            if let Ok(dst_ptr) = batch.packet(z, 64) {
+                                //println!("Ok {:?}", &dst_ptr);
+                                _mm512_stream_si512(
+                                    dst_ptr.as_mut_ptr() as *mut __m512i,
+                                    current_packet_zmm,
+                                );
 
-                            _mm512_stream_si512(
-                                dst_ptr.as_mut_ptr().add(64) as *mut __m512i,
-                                payload_zmm1,
-                            );
-                            _mm512_stream_si512(
-                                dst_ptr.as_mut_ptr().add(128) as *mut __m512i,
-                                payload_zmm2,
-                            );
-                            _mm512_stream_si512(
-                                dst_ptr.as_mut_ptr().add(192) as *mut __m512i,
-                                payload_zmm3,
-                            );
+                                _mm512_stream_si512(
+                                    dst_ptr.as_mut_ptr().add(64) as *mut __m512i,
+                                    payload_zmm1,
+                                );
+                                _mm512_stream_si512(
+                                    dst_ptr.as_mut_ptr().add(128) as *mut __m512i,
+                                    payload_zmm2,
+                                );
+                                _mm512_stream_si512(
+                                    dst_ptr.as_mut_ptr().add(192) as *mut __m512i,
+                                    payload_zmm3,
+                                );
 
-                            let mut next_fields_zmm =
-                                _mm512_add_epi32(current_packet_zmm, increment_zmm);
-                            next_fields_zmm =
-                                _mm512_sub_epi32(next_fields_zmm, checksum_decrement_zmm);
+                                let mut next_fields_zmm =
+                                    _mm512_add_epi32(current_packet_zmm, increment_zmm);
+                                next_fields_zmm =
+                                    _mm512_sub_epi32(next_fields_zmm, checksum_decrement_zmm);
 
-                            let cmp_mask =
-                                _mm512_cmpeq_epi32_mask(next_fields_zmm, checksum_zero_trigger);
-                            next_fields_zmm = _mm512_mask_sub_epi32(
-                                next_fields_zmm,
-                                cmp_mask,
-                                next_fields_zmm,
-                                checksum_correction_zmm,
-                            );
+                                let cmp_mask =
+                                    _mm512_cmpeq_epi32_mask(next_fields_zmm, checksum_zero_trigger);
+                                next_fields_zmm = _mm512_mask_sub_epi32(
+                                    next_fields_zmm,
+                                    cmp_mask,
+                                    next_fields_zmm,
+                                    checksum_correction_zmm,
+                                );
 
-                            current_packet_zmm =
-                                _mm512_mask_blend_epi32(blend_mask, template_zmm, next_fields_zmm);
+                                current_packet_zmm = _mm512_mask_blend_epi32(
+                                    blend_mask,
+                                    template_zmm,
+                                    next_fields_zmm,
+                                );
 
-                            packets_written += 1;
+                                packets_written += 1;
+                            }
                         }
+                        _mm_sfence();
+                        i += 1;
+                        batch.commit(packets_written);
+
+                        // 3. Отправляем в сеть
+                        tx_ring.sync_ioctl(&nm);
                     }
-                    _mm_sfence();
-                    i += 1;
-                    batch.commit(packets_written);
+                    Err(Error::InsufficientSpace) => {
+                        // КОЛЬЦО ПОЛНОЕ: Сетевая карта не успела отправить прошлый батч.
+                        // Принудительно вызываем sync_ioctl на случай, если прошлый раз сбойнул
+                        tx_ring.sync_ioctl(&nm);
 
-                    // 3. Отправляем в сеть
-                    tx_ring.sync_ioctl(&nm);
-
-                    //println!("{}", packets_written);
+                        // Засыпаем через poll() на 1-10 мс, чтобы дать сетевой карте
+                        // обработать аппаратные TX-дескрипторы и сдвинуть tail
+                        tx_ring.sync(&nm);
+                    }
+                    Err(e) => {
+                        eprintln!("Непредвиденная ошибка резервирования: {:?}", e);
+                        break;
+                    }
                 }
 
-                i += 1;
+                //i += 1;
             }
         }
     }
